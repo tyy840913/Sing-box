@@ -58,7 +58,7 @@ fi
 check_nginx() {
 if command -v nginx &>/dev/null; then
     if [ -f /etc/alpine-release ]; then
-        rc-service nginx status | grep -q "started" && green "running" && return 0 || yellow "not running" && return 1
+        rc-service nginx status | grep -q "stoped" && yellow "not running" && return 1 || green "running" && return 0
     else 
         [ "$(systemctl is-active nginx)" = "active" ] && green "running" && return 0 || yellow "not running" && return 1
     fi
@@ -177,14 +177,14 @@ install_singbox() {
     private_key=$(echo "${output}" | awk '/PrivateKey:/ {print $2}')
     public_key=$(echo "${output}" | awk '/PublicKey:/ {print $2}')
 
-    iptables -A INPUT -p tcp --dport 8001 -j ACCEPT 
-    iptables -A INPUT -p tcp --dport $vless_port -j ACCEPT 
-    iptables -A INPUT -p tcp --dport $nginx_port -j ACCEPT 
-    iptables -A INPUT -p udp --dport $tuic_port -j ACCEPT 
-    iptables -A INPUT -p udp --dport $hy2_port -j ACCEPT
-    iptables -P FORWARD ACCEPT 
-    iptables -P OUTPUT ACCEPT
-    iptables -F
+    iptables -A INPUT -p tcp --dport 8001 -j ACCEPT > /dev/null 2>&1 
+    iptables -A INPUT -p tcp --dport $vless_port -j ACCEPT > /dev/null 2>&1 
+    iptables -A INPUT -p tcp --dport $nginx_port -j ACCEPT > /dev/null 2>&1 
+    iptables -A INPUT -p udp --dport $tuic_port -j ACCEPT > /dev/null 2>&1 
+    iptables -A INPUT -p udp --dport $hy2_port -j ACCEPT > /dev/null 2>&1
+    iptables -P FORWARD ACCEPT > /dev/null 2>&1 
+    iptables -P OUTPUT ACCEPT > /dev/null 2>&1
+    iptables -F > /dev/null 2>&1
     manage_packages uninstall ufw firewalld iptables-persistent iptables-services > /dev/null 2>&1
 
     # 生成自签名证书
@@ -222,11 +222,11 @@ cat > "${config_dir}" << EOF
         ],
         "tls": {
             "enabled": true,
-            "server_name": "www.zara.com",
+            "server_name": "www.iij.ad.jp",
             "reality": {
                 "enabled": true,
                 "handshake": {
-                    "server": "www.zara.com",
+                    "server": "www.iij.ad.jp",
                     "server_port": 443
                 },
                 "private_key": "$private_key",
@@ -532,18 +532,24 @@ get_info() {
   clear
   server_ip=$(get_realip)
 
-  isp=$(curl -s https://speed.cloudflare.com/meta | awk -F\" '{print $26"-"$18}' | sed -e 's/ /_/g')
+  isp=$(curl -s --max-time 2 https://speed.cloudflare.com/meta | awk -F\" '{print $26"-"$18}' | sed -e 's/ /_/g' || echo "vps")
 
-  argodomain=$(grep -oE 'https://[[:alnum:]+\.-]+\.trycloudflare\.com' "${work_dir}/argo.log" | sed 's@https://@@')
-
-  echo -e "${green}\nArgoDomain：${re}${purple}$argodomain${re}"
+  if [ -f "${work_dir}/argo.log" ]; then
+      argodomain=$(sed -n 's|.*https://\([^/]*trycloudflare\.com\).*|\1|p' "${work_dir}/argo.log")
+      [ -z "$argodomain" ] && sleep 2 && argodomain=$(grep -oP '(?<=https://)[^\s]+trycloudflare\.com' "${work_dir}/argo.log")
+      [ -z "$argodomain" ] && restart_argo && sleep 6 && argodomain=$(sed -n 's|.*https://\([^/]*trycloudflare\.com\).*|\1|p' "${work_dir}/argo.log")
+      [ -z "$argodomain" ] && red "未能获取到Argo临时域名,请运行完毕后进入${yellow}Argo管理${re}菜单重新获取"
+  else
+      restart_argo && sleep 6 && argodomain=$(sed -n 's|.*https://\([^/]*trycloudflare\.com\).*|\1|p' "${work_dir}/argo.log")
+  fi
+  green "ArgoDomain：${purple}$argodomain${re}\n"
 
   yellow "\n温馨提醒：如节点不通，请打开V2rayN里的 “跳过证书验证”，或将节点的跳过证书验证设置为“true”\n"
 
   VMESS="{ \"v\": \"2\", \"ps\": \"${isp}\", \"add\": \"${CFIP}\", \"port\": \"${CFPORT}\", \"id\": \"${uuid}\", \"aid\": \"0\", \"scy\": \"none\", \"net\": \"ws\", \"type\": \"none\", \"host\": \"${argodomain}\", \"path\": \"/vmess?ed=2048\", \"tls\": \"tls\", \"sni\": \"${argodomain}\", \"alpn\": \"\", \"fp\": \"randomized\", \"allowlnsecure\": \"flase\"}"
 
   cat > ${work_dir}/url.txt <<EOF
-vless://${uuid}@${server_ip}:${vless_port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=www.zara.com&fp=chrome&pbk=${public_key}&type=tcp&headerType=none#${isp}
+vless://${uuid}@${server_ip}:${vless_port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=www.iij.ad.jp&fp=chrome&pbk=${public_key}&type=tcp&headerType=none#${isp}
 
 vmess://$(echo "$VMESS" | base64 -w0)
 
@@ -964,18 +970,20 @@ if [ ${check_singbox} -eq 0 ]; then
             ;;
         3)  
             clear
-            green "\n1. www.ups.com\n\n2. www.svix.com\n\n3. www.cboe.com\n\n4. www.hubspot.com\n"
+            green "\n1. www.joom.com\n\n2. www.stengg.com\n\n3. www.wedgehr.com\n\n4. www.cerebrium.ai\n\n5. www.nazhumi.com\n"
             reading "\n请输入新的Reality伪装域名(可自定义输入,回车留空将使用默认1): " new_sni
                 if [ -z "$new_sni" ]; then    
-                    new_sni="www.ups.com"
+                    new_sni="www.joom.com"
                 elif [[ "$new_sni" == "1" ]]; then
-                    new_sni="www.ups.com"
+                    new_sni="www.joom.com"
                 elif [[ "$new_sni" == "2" ]]; then
-                    new_sni="www.svix.com"
+                    new_sni="www.stengg.com"
                 elif [[ "$new_sni" == "3" ]]; then
-                    new_sni="www.cboe.com"
+                    new_sni="www.wedgehr.com"
                 elif [[ "$new_sni" == "4" ]]; then
-                    new_sni="www.hubspot.com"
+                    new_sni="www.cerebrium.ai"
+	        elif [[ "$new_sni" == "5" ]]; then
+                    new_sni="www.cerebrium.ai"
                 else
                     new_sni="$new_sni"
                 fi
@@ -1170,7 +1178,7 @@ EOF
 
         6)  
             if [ -f /etc/alpine-release ]; then
-                if grep -q '--url http://localhost:8001' /etc/init.d/argo; then
+                if grep -Fq -- '--url http://localhost:8001' /etc/init.d/argo; then
                     get_quick_tunnel
                     change_argo_domain 
                 else
@@ -1199,9 +1207,16 @@ fi
 get_quick_tunnel() {
 restart_argo
 yellow "获取临时argo域名中，请稍等...\n"
-sleep 4
-get_argodomain=$(grep -oE 'https://[[:alnum:]+\.-]+\.trycloudflare\.com' "${work_dir}/argo.log" | sed 's@https://@@')
-green "ArgoDomain：${purple}$get_argodomain${re}"
+sleep 6
+if [ -f /etc/sing-box/argo.log ]; then
+    get_argodomain=$(sed -n 's|.*https://\([^/]*trycloudflare\.com\).*|\1|p' /etc/sing-box/argo.log)
+    [ -z "$get_argodomain" ] && sleep 2 && get_argodomain=$(grep -oP '(?<=https://)[^\s]+trycloudflare\.com' /etc/sing-box/argo.log)
+    [ -z "$get_argodomain" ] && restart_argo && sleep 6 && get_argodomain=$(sed -n 's|.*https://\([^/]*trycloudflare\.com\).*|\1|p' /etc/sing-box/argo.log)
+    [ -z "$get_argodomain" ] && red "未能获取到Argo临时域名,请重新获取"
+else
+    restart_argo && sleep 6 && get_argodomain=$(sed -n 's|.*https://\([^/]*trycloudflare\.com\).*|\1|p' /etc/sing-box/argo.log)
+fi
+green "ArgoDomain：${purple}$get_argodomain${re}\n"
 ArgoDomain=$get_argodomain
 }
 
@@ -1218,7 +1233,7 @@ new_vmess_url="$vmess_prefix$encoded_updated_vmess"
 new_content=$(echo "$content" | sed "s|$vmess_url|$new_vmess_url|")
 echo "$new_content" > "$client_dir"
 base64 -w0 ${work_dir}/url.txt > ${work_dir}/sub.txt
-green "\nvmess节点已更新,更新订阅或手动复制以下vmess-argo节点\n"
+green "vmess节点已更新,更新订阅或手动复制以下vmess-argo节点\n"
 purple "$new_vmess_url\n" 
 }
 
@@ -1296,7 +1311,7 @@ while true; do
                     exit 1 
                 fi
 
-                sleep 4
+                sleep 6
                 get_info
                 add_nginx_conf
                 create_shortcut
