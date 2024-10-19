@@ -127,7 +127,7 @@ manage_packages() {
 
 # 获取ip
 get_realip() {
-  ip=$(curl -s ipv4.ip.sb)
+  ip=$(curl -s --max-time 2 ipv4.ip.sb)
   if [ -z "$ip" ]; then
       ipv6=$(curl -s --max-time 1 ipv6.ip.sb)
       echo "[$ipv6]"
@@ -177,15 +177,10 @@ install_singbox() {
     private_key=$(echo "${output}" | awk '/PrivateKey:/ {print $2}')
     public_key=$(echo "${output}" | awk '/PublicKey:/ {print $2}')
 
-    iptables -A INPUT -p tcp --dport 8001 -j ACCEPT > /dev/null 2>&1 
-    iptables -A INPUT -p tcp --dport $vless_port -j ACCEPT > /dev/null 2>&1 
-    iptables -A INPUT -p tcp --dport $nginx_port -j ACCEPT > /dev/null 2>&1 
-    iptables -A INPUT -p udp --dport $tuic_port -j ACCEPT > /dev/null 2>&1 
-    iptables -A INPUT -p udp --dport $hy2_port -j ACCEPT > /dev/null 2>&1
-    iptables -P FORWARD ACCEPT > /dev/null 2>&1 
-    iptables -P OUTPUT ACCEPT > /dev/null 2>&1
-    iptables -F > /dev/null 2>&1
-    manage_packages uninstall ufw firewalld iptables-persistent iptables-services > /dev/null 2>&1
+    iptables -F > /dev/null 2>&1 && iptables -P INPUT ACCEPT > /dev/null 2>&1 && iptables -P FORWARD ACCEPT > /dev/null 2>&1 && iptables -P OUTPUT ACCEPT > /dev/null 2>&1
+    command -v ip6tables &> /dev/null && ip6tables -F > /dev/null 2>&1 && ip6tables -P INPUT ACCEPT > /dev/null 2>&1 && ip6tables -P FORWARD ACCEPT > /dev/null 2>&1 && ip6tables -P OUTPUT ACCEPT > /dev/null 2>&1
+    
+    manage_packages uninstall ufw firewalld > /dev/null 2>&1
 
     # 生成自签名证书
     openssl ecparam -genkey -name prime256v1 -out "${work_dir}/private.key"
@@ -236,7 +231,6 @@ cat > "${config_dir}" << EOF
             }
         }
     },
-
     {
         "tag": "vmess-ws",
         "type": "vmess",
@@ -253,28 +247,32 @@ cat > "${config_dir}" << EOF
         "early_data_header_name": "Sec-WebSocket-Protocol"
         }
     },
- 
     {
         "tag": "hysteria2",
         "type": "hysteria2",
         "listen": "::",
         "listen_port": $hy2_port,
+        "sniff": true,
+        "sniff_override_destination": false,
         "users": [
             {
                 "password": "$uuid"
             }
         ],
+        "ignore_client_bandwidth":false,
         "masquerade": "https://bing.com",
         "tls": {
             "enabled": true,
             "alpn": [
                 "h3"
             ],
+            "min_version":"1.3",
+            "max_version":"1.3",
             "certificate_path": "$work_dir/cert.pem",
             "key_path": "$work_dir/private.key"
         }
+
     },
- 
     {
         "tag": "tuic",
         "type": "tuic",
@@ -535,16 +533,19 @@ get_info() {
   isp=$(curl -s --max-time 2 https://speed.cloudflare.com/meta | awk -F\" '{print $26"-"$18}' | sed -e 's/ /_/g' || echo "vps")
 
   if [ -f "${work_dir}/argo.log" ]; then
-      argodomain=$(sed -n 's|.*https://\([^/]*trycloudflare\.com\).*|\1|p' "${work_dir}/argo.log")
-      [ -z "$argodomain" ] && sleep 2 && argodomain=$(grep -oP '(?<=https://)[^\s]+trycloudflare\.com' "${work_dir}/argo.log")
-      [ -z "$argodomain" ] && restart_argo && sleep 6 && argodomain=$(sed -n 's|.*https://\([^/]*trycloudflare\.com\).*|\1|p' "${work_dir}/argo.log")
-      [ -z "$argodomain" ] && red "未能获取到Argo临时域名,请运行完毕后进入${yellow}Argo管理${re}菜单重新获取"
+      for i in {1..5}; do
+          purple "第 $i 次尝试获取ArgoDoamin中..."
+          argodomain=$(sed -n 's|.*https://\([^/]*trycloudflare\.com\).*|\1|p' "${work_dir}/argo.log")
+          [ -n "$argodomain" ] && break
+          sleep 2
+      done
   else
-      restart_argo && sleep 6 && argodomain=$(sed -n 's|.*https://\([^/]*trycloudflare\.com\).*|\1|p' "${work_dir}/argo.log")
+      restart_argo
+      sleep 6
+      argodomain=$(sed -n 's|.*https://\([^/]*trycloudflare\.com\).*|\1|p' "${work_dir}/argo.log")
   fi
-  green "ArgoDomain：${purple}$argodomain${re}\n"
 
-  yellow "\n温馨提醒：如节点不通，请打开V2rayN里的 “跳过证书验证”，或将节点的跳过证书验证设置为“true”\n"
+  green "\nArgoDomain：${purple}$argodomain${re}\n"
 
   VMESS="{ \"v\": \"2\", \"ps\": \"${isp}\", \"add\": \"${CFIP}\", \"port\": \"${CFPORT}\", \"id\": \"${uuid}\", \"aid\": \"0\", \"scy\": \"none\", \"net\": \"ws\", \"type\": \"none\", \"host\": \"${argodomain}\", \"path\": \"/vmess?ed=2048\", \"tls\": \"tls\", \"sni\": \"${argodomain}\", \"alpn\": \"\", \"fp\": \"randomized\", \"allowlnsecure\": \"flase\"}"
 
@@ -560,9 +561,10 @@ EOF
 echo ""
 while IFS= read -r line; do echo -e "${purple}$line"; done < ${work_dir}/url.txt
 base64 -w0 ${work_dir}/url.txt > ${work_dir}/sub.txt
-echo ""
-green "节点订阅链接：http://${server_ip}/${password}\n\n订阅链接适用于V2rayN,Nekbox,Sterisand,Loon,小火箭,圈X等\n"
-$work_dir/qrencode "http://${server_ip}/${password}"
+yellow "\n温馨提醒：需打开V2rayN或其他软件里的 “跳过证书验证”，或将节点的Insecure或TLS里设置为“true”\n"
+green "节点订阅链接：http://${server_ip}:${nginx_port}/${password}\n\n订阅链接适用于V2rayN,Nekbox,Sterisand,Loon,小火箭,圈X等\n"
+green "订阅二维码"
+$work_dir/qrencode "http://${server_ip}:${nginx_port}/${password}"
 echo ""
 }
 
@@ -591,8 +593,8 @@ events {
 
 http {
     server {
-      listen 80;
-      listen [::]:80;
+      listen $nginx_port;
+      listen [::]:$nginx_port;
 
     location /$password {
       alias /etc/sing-box/sub.txt;
@@ -602,12 +604,12 @@ http {
 }
 EOF
 
-nginx -t
+nginx -t > /dev/null
 
 if [ $? -eq 0 ]; then
     if [ -f /etc/alpine-release ]; then
-    	touch /run/nginx.pid
      	pkill -f '[n]ginx'
+        touch /run/nginx.pid
         nginx -s reload
         rc-service nginx restart
     else
@@ -801,6 +803,9 @@ restart_nginx() {
 if command -v nginx &>/dev/null; then
     yellow "正在重启 nginx 服务\n"
     if [ -f /etc/alpine-release ]; then
+     	pkill -f '[n]ginx'
+        touch /run/nginx.pid
+        nginx -s reload
         rc-service nginx restart
     else
         systemctl restart nginx
@@ -843,6 +848,7 @@ uninstall_singbox() {
            # 删除配置文件和日志
            rm -rf "${work_dir}" || true
            rm -f "${log_dir}" || true
+	   rm -rf /etc/systemd/system/sing-box.service /etc/systemd/system/argo.service > /dev/null 2>&1
            
            # 卸载Nginx
            reading "\n是否卸载 Nginx？${green}(卸载请输入 ${yellow}y${re} ${green}回车将跳过卸载Nginx) (y/n): ${re}" choice
@@ -850,15 +856,15 @@ uninstall_singbox() {
                 y|Y)
                     manage_packages uninstall nginx
                     ;;
-                 *)
-                    yellow "取消卸载Nginx\n"
+                 *) 
+                    yellow "取消卸载Nginx\n\n"
                     ;;
             esac
 
-            green "\nsing-box 卸载成功\n"
+            green "\nsing-box 卸载成功\n\n" && exit 0
            ;;
        *)
-           purple "已取消卸载操作\n"
+           purple "已取消卸载操作\n\n"
            ;;
    esac
 }
@@ -873,9 +879,9 @@ EOF
   chmod +x "$work_dir/sb.sh"
   ln -sf "$work_dir/sb.sh" /usr/bin/sb
   if [ -s /usr/bin/sb ]; then
-    green "\nsb 快捷指令创建成功\n"
+    green "\n快捷指令 sb 创建成功\n"
   else
-    red "\nsb 快捷指令创建失败\n"
+    red "\n快捷指令创建失败\n"
   fi
 }
 
@@ -897,7 +903,11 @@ if [ ${check_singbox} -eq 0 ]; then
     skyblue "------------"
     green "3. 修改Reality伪装域名"
     skyblue "------------"
-    purple "${purple}4. 返回主菜单"
+    green "4. 添加hysteria2端口跳跃"
+    skyblue "------------"
+    green "5. 删除hysteria2端口跳跃"
+    skyblue "------------"
+    purple "${purple}6. 返回主菜单"
     skyblue "------------"
     reading "请输入选择: " choice
     case "${choice}" in
@@ -983,7 +993,7 @@ if [ ${check_singbox} -eq 0 ]; then
                 elif [[ "$new_sni" == "4" ]]; then
                     new_sni="www.cerebrium.ai"
 	        elif [[ "$new_sni" == "5" ]]; then
-                    new_sni="www.cerebrium.ai"
+                    new_sni="www.nazhumi.com"
                 else
                     new_sni="$new_sni"
                 fi
@@ -998,7 +1008,76 @@ if [ ${check_singbox} -eq 0 ]; then
                 echo ""
                 green "\nReality sni已修改为：${purple}${new_sni}${re} ${green}请更新订阅或手动更改reality节点的sni域名${re}\n"
             ;; 
-        4)  menu ;;
+        4)  
+            purple "端口跳跃需确保跳跃区间的端口没有被占用，nat鸡请注意可用端口范围，否则可能造成节点不通\n"
+            reading "请输入跳跃起始端口 (回车跳过将使用随机端口): " min_port
+            [ -z "$min_port" ] && min_port=$(shuf -i 50000-65000 -n 1)
+            yellow "你的起始端口为：$min_port"
+            reading "\n请输入跳跃结束端口 (需大于起始端口): " max_port
+            [ -z "$max_port" ] && max_port=$(($min_port + 100)) 
+            yellow "你的结束端口为：$max_port\n"
+            purple "正在安装依赖，并设置端口跳跃规则中，请稍等...\n"
+            listen_port=$(sed -n '/"tag": "hysteria2"/,/}/s/.*"listen_port": \([0-9]*\).*/\1/p' $config_dir)
+            iptables -t nat -A PREROUTING -p udp --dport $min_port:$max_port -j DNAT --to-destination :$listen_port > /dev/null
+            command -v ip6tables &> /dev/null && ip6tables -t nat -A PREROUTING -p udp --dport $min_port:$max_port -j DNAT --to-destination :$listen_port > /dev/null
+            if [ -f /etc/alpine-release ]; then
+                iptables-save > /etc/iptables/rules.v4
+                command -v ip6tables &> /dev/null && ip6tables-save > /etc/iptables/rules.v6
+
+                cat << 'EOF' > /etc/init.d/iptables
+#!/sbin/openrc-run
+
+depend() {
+    need net
+}
+
+start() {
+    [ -f /etc/iptables/rules.v4 ] && iptables-restore < /etc/iptables/rules.v4
+    command -v ip6tables &> /dev/null && [ -f /etc/iptables/rules.v6 ] && ip6tables-restore < /etc/iptables/rules.v6
+}
+EOF
+
+                chmod +x /etc/init.d/iptables && rc-update add iptables default && /etc/init.d/iptables start
+            elif [ -f /etc/debian_version ]; then
+                DEBIAN_FRONTEND=noninteractive apt install -y iptables-persistent > /dev/null 2>&1 && netfilter-persistent save > /dev/null 2>&1 
+                systemctl enable netfilter-persistent > /dev/null 2>&1 && systemctl start netfilter-persistent > /dev/null 2>&1
+            elif [ -f /etc/redhat-release ]; then
+                manage_packages install iptables-services > /dev/null 2>&1 && service iptables save > /dev/null 2>&1
+                systemctl enable iptables > /dev/null 2>&1 && systemctl start iptables > /dev/null 2>&1
+                command -v ip6tables &> /dev/null && service ip6tables save > /dev/null 2>&1
+                systemctl enable ip6tables > /dev/null 2>&1 && systemctl start ip6tables > /dev/null 2>&1
+            else
+                red "未知系统,请自行将跳跃端口转发到主端口" && exit 1
+            fi            
+            restart_singbox
+            ip=$(get_realip)
+            uuid=$(sed -n 's/.*hysteria2:\/\/\([^@]*\)@.*/\1/p' $client_dir)
+            line_number=$(grep -n 'hysteria2://' $client_dir | cut -d':' -f1)
+            isp=$(curl -s --max-time 2 https://speed.cloudflare.com/meta | awk -F\" '{print $26"-"$18}' | sed -e 's/ /_/g' || echo "vps")
+            sed -i.bak "/hysteria2:/d" $client_dir
+            sed -i "${line_number}i hysteria2://$uuid@$ip:$listen_port?peer=www.bing.com&insecure=1&alpn=h3&obfs=none&mport=$listen_port,$min_port-$max_port#$isp" $client_dir
+            base64 -w0 $client_dir > /etc/sing-box/sub.txt
+            while IFS= read -r line; do yellow "$line"; done < ${work_dir}/url.txt
+            green "\nhysteria2端口跳跃已开启,跳跃端口为：${purple}$min_port-$max_port${re} ${green}请更新订阅或手动复制以上hysteria2节点${re}\n"
+            ;;
+        5)  
+            iptables -t nat -F PREROUTING  > /dev/null 2>&1
+            command -v ip6tables &> /dev/null && ip6tables -t nat -F PREROUTING  > /dev/null 2>&1
+            if [ -f /etc/alpine-release ]; then
+                rc-update del iptables default && rm -rf /etc/init.d/iptables 
+            elif [ -f /etc/redhat-release ]; then
+                netfilter-persistent save > /dev/null 2>&1
+            elif [ -f /etc/redhat-release ]; then
+                service iptables save > /dev/null 2>&1
+                command -v ip6tables &> /dev/null && service ip6tables save > /dev/null 2>&1
+            else
+                manage_packages uninstall iptables ip6tables iptables-persistent iptables-service > /dev/null 2>&1
+            fi
+            sed -i '/hysteria2/s/&mport=[^#&]*//g' /etc/sing-box/url.txt
+            base64 -w0 $client_dir > /etc/sing-box/sub.txt
+            green "\n端口跳跃已删除\n"
+            ;;
+        6)  menu ;;
         *)  read "无效的选项！" ;; 
     esac
 else
@@ -1119,7 +1198,13 @@ else
     case "${choice}" in
         1)  start_argo ;;
         2)  stop_argo ;; 
-        3)  restart_argo ;; 
+        3)  clear
+            if [ -f /etc/alpine-release ]; then
+                grep -Fq -- '--url http://localhost:8001' /etc/init.d/argo && get_quick_tunnel && change_argo_domain || { green "\n当前使用固定隧道,无需获取临时域名"; sleep 2; menu; }
+            else
+                grep -q 'ExecStart=.*--url http://localhost:8001' /etc/systemd/system/argo.service && get_quick_tunnel && change_argo_domain || { green "\n当前使用固定隧道,无需获取临时域名"; sleep 2; menu; }
+            fi
+         ;; 
         4)
             clear
             yellow "\n固定隧道可为json或token，固定隧道端口为8001，自行在cf后台设置\n\njson在f佬维护的站点里获取，获取地址：${purple}https://fscarmen.cloudflare.now.cc${re}\n"
@@ -1207,14 +1292,18 @@ fi
 get_quick_tunnel() {
 restart_argo
 yellow "获取临时argo域名中，请稍等...\n"
-sleep 6
+sleep 3
 if [ -f /etc/sing-box/argo.log ]; then
-    get_argodomain=$(sed -n 's|.*https://\([^/]*trycloudflare\.com\).*|\1|p' /etc/sing-box/argo.log)
-    [ -z "$get_argodomain" ] && sleep 2 && get_argodomain=$(grep -oP '(?<=https://)[^\s]+trycloudflare\.com' /etc/sing-box/argo.log)
-    [ -z "$get_argodomain" ] && restart_argo && sleep 6 && get_argodomain=$(sed -n 's|.*https://\([^/]*trycloudflare\.com\).*|\1|p' /etc/sing-box/argo.log)
-    [ -z "$get_argodomain" ] && red "未能获取到Argo临时域名,请重新获取"
+  for i in {1..5}; do
+      purple "第 $i 次尝试获取ArgoDoamin中..."
+      get_argodomain=$(sed -n 's|.*https://\([^/]*trycloudflare\.com\).*|\1|p' /etc/sing-box/argo.log)
+      [ -n "$get_argodomain" ] && break
+      sleep 2
+  done
 else
-    restart_argo && sleep 6 && get_argodomain=$(sed -n 's|.*https://\([^/]*trycloudflare\.com\).*|\1|p' /etc/sing-box/argo.log)
+  restart_argo
+  sleep 6
+  get_argodomain=$(sed -n 's|.*https://\([^/]*trycloudflare\.com\).*|\1|p' /etc/sing-box/argo.log)
 fi
 green "ArgoDomain：${purple}$get_argodomain${re}\n"
 ArgoDomain=$get_argodomain
@@ -1241,10 +1330,10 @@ purple "$new_vmess_url\n"
 check_nodes() {
 if [ ${check_singbox} -eq 0 ]; then
     while IFS= read -r line; do purple "${purple}$line"; done < ${work_dir}/url.txt
-    echo ""
     server_ip=$(get_realip)
-    lujing=$(grep -oP 'location /\K[^ ]+' "/etc/nginx/nginx.conf")
-    green "\n节点订阅链接：http://${server_ip}/${lujing}\n"
+    lujing=$(sed -n 's|.*location /||p' /etc/nginx/nginx.conf | awk '{print $1}')
+    sub_port=$(sed -n 's/^\s*listen \([0-9]\+\);/\1/p' /etc/nginx/nginx.conf)
+    green "\n节点订阅链接：http://${server_ip}:${sub_port}/${lujing}\n"
 else 
     yellow "sing-box 尚未安装或未运行,请先安装或启动sing-box"
     sleep 1
@@ -1257,9 +1346,9 @@ menu() {
    check_singbox &>/dev/null; check_singbox=$?
    check_nginx &>/dev/null; check_nginx=$?
    check_argo &>/dev/null; check_argo=$?
-   check_singbox_status=$(check_singbox)
-   check_nginx_status=$(check_nginx)
-   check_argo_status=$(check_argo)
+   check_singbox_status=$(check_singbox) > /dev/null 2>&1
+   check_nginx_status=$(check_nginx) > /dev/null 2>&1
+   check_argo_status=$(check_argo) > /dev/null 2>&1
    clear
    echo ""
    purple "=== 老王sing-box一键安装脚本 ===\n"
@@ -1296,7 +1385,8 @@ while true; do
                 yellow "sing-box 已经安装！"
             else
                 fix_nginx
-                manage_packages install nginx jq tar iptables openssl coreutils
+                manage_packages install nginx jq tar openssl iptables coreutils
+                [ -n "$(curl -s --max-time 2 ipv6.ip.sb)" ] && manage_packages install ip6tables
                 install_singbox
 
                 if [ -x "$(command -v systemctl)" ]; then
@@ -1311,7 +1401,7 @@ while true; do
                     exit 1 
                 fi
 
-                sleep 6
+                sleep 5
                 get_info
                 add_nginx_conf
                 create_shortcut
